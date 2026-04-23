@@ -85,16 +85,23 @@ TRANSLATION_PROMPTS = {
 }
 
 def post_process_translation(text, mode):
-    # 若目標語言不是中文，但結果包含中文，嘗試過濾掉可能的解釋
-    if "翻中" not in mode:
+    original_text = text.strip()
+    # 移除常見的開場白
+    text = re.sub(r'^(翻譯結果|譯文|Translation|結果|Output)：\s*', '', original_text, flags=re.I)
+
+    # 若目標語言不是中文或日文，但結果包含中文，嘗試過濾掉可能的解釋
+    # 因為日文包含漢字，所以中翻日不能過濾。中翻韓也建議保留，因為韓文有時使用漢字且韓文字元不在此範圍內。
+    if "翻中" not in mode and "翻日" not in mode:
         # 移除包含中文的括號或後續文字 (Gemma 喜歡在後面括號解釋)
         # 例如: "Churros (西班牙油條是一種...)" -> "Churros"
-        text = re.split(r'[\(\（\s]*[\u4e00-\u9fff]+', text)[0]
-    
-    # 移除常見的開場白
-    text = re.sub(r'^(翻譯結果|譯文|Translation)：\s*', '', text, flags=re.I)
-    return text.strip()
+        parts = re.split(r'[\(\（\s]*[\u4e00-\u9fff]+', text)
+        if parts[0].strip():
+            text = parts[0]
+        # 如果第一部分是空的，表示開頭就是中文，那可能整句都是翻譯或是解釋放在前面，
+        # 在這種情況下我們保留原狀，避免回傳空字串
 
+    result = text.strip()
+    return result if result else original_text if original_text else " "
 async def ollama_request(text, mode):
     client = ollama.Client(host=os.getenv('OLLAMA_HOST'))
     mode_info = TRANSLATION_PROMPTS[mode]
