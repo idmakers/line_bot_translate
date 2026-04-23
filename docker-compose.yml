@@ -1,0 +1,16 @@
+services:
+  line_bot_translate:
+    build: .
+    ports:
+      - "5002:5002"
+    volumes:
+      - .:/app
+    environment:
+      - FLASK_APP=app.py
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_DEBUG=1
+      - FLASK_RUN_PORT=5002
+      - CHANNEL_ACCESS_TOKEN=${CHANNEL_ACCESS_TOKEN}
+      - CHANNEL_SECRET=${CHANNEL_SECRET}
+      - OLLAMA_HOST=${OLLAMA_HOST}
+    restart: always
