@@ -14,8 +14,12 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    FlexMessage,
+    FlexContainer
 )
+import re
+
 from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent
@@ -59,48 +63,129 @@ def callback():
 # In-memory storage for user translation modes
 user_modes = {}
 
+SYSTEM_BASE = """你是一位精通各國口語的專業翻譯。
+- 嚴禁逐字翻譯：必須使用目標語言最道地的慣用語（例：『現在幾點』翻為日文應為『今、何時ですか？』）。
+- 文化常識校正：確保特定食物/名詞正確（例：『西班牙油條』是『Churros』而非炸薯條）。
+- 格式限定：只輸出翻譯結果，嚴禁任何解釋或開場白。"""
+
+FEW_SHOT_EXAMPLES = [
+    {"role": "user", "content": "[中翻日] 現在幾點"},
+    {"role": "assistant", "content": "今、何時ですか？"},
+    {"role": "user", "content": "[中翻西] 西班牙油條"},
+    {"role": "assistant", "content": "Churros"}
+]
+
 TRANSLATION_PROMPTS = {
-    "中翻日": {
-        "name": "Chinese to Japanese",
-        "system": "You are a professional Traditional Chinese (zh-TW) to Japanese (ja-JP) translator. Your goal is to accurately convey the meaning and nuances of the original Traditional Chinese text while adhering to Japanese grammar, vocabulary, and cultural sensitivities. Produce only the Japanese translation, without any additional explanations or commentary. Please translate the following Traditional Chinese text into Japanese:"
-    },
-    "日翻中": {
-        "name": "Japanese to Chinese",
-        "system": "You are a professional Japanese (ja-JP) to Traditional Chinese (zh-TW) translator. Your goal is to accurately convey the meaning and nuances of the original Japanese text while adhering to Traditional Chinese grammar, vocabulary, and cultural sensitivities. Produce only the Traditional Chinese translation, without any additional explanations or commentary. Please translate the following Japanese text into Traditional Chinese:"
-    },
-    "韓翻中": {
-        "name": "Korean to Chinese", 
-        "system": "You are a professional Korean (ko-KR) to Traditional Chinese (zh-TW) translator. Your goal is to accurately convey the meaning and nuances of the original Korean text while adhering to Traditional Chinese grammar, vocabulary, and cultural sensitivities. Produce only the Traditional Chinese translation, without any additional explanations or commentary. Please translate the following Korean text into Traditional Chinese:"
-    },
-    "中翻韓": {
-        "name": "Chinese to Korean",
-        "system": "You are a professional Traditional Chinese (zh-TW) to Korean (ko-KR) translator. Your goal is to accurately convey the meaning and nuances of the original Traditional Chinese text while adhering to Korean grammar, vocabulary, and cultural sensitivities. Produce only the Korean translation, without any additional explanations or commentary. Please translate the following Traditional Chinese text into Korean:"
-    },
-    "中翻西": {
-        "name": "Chinese to Spanish",
-        "system": "You are a professional Traditional Chinese (zh-TW) to Spanish (es-ES) translator. Your goal is to accurately convey the meaning and nuances of the original Traditional Chinese text while adhering to Spanish grammar, vocabulary, and cultural sensitivities. Produce only the Spanish translation, without any additional explanations or commentary. Please translate the following Traditional Chinese text into Spanish:"
-    },
-    "西翻中": {
-        "name": "Spanish to Chinese",
-        "system": "You are a professional Spanish (es-ES) to Traditional Chinese (zh-TW) translator. Your goal is to accurately convey the meaning and nuances of the original Spanish text while adhering to Traditional Chinese grammar, vocabulary, and cultural sensitivities. Produce only the Traditional Chinese translation, without any additional explanations or commentary. Please translate the following Spanish text into Traditional Chinese:"
-    }
+    "中翻日": {"name": "中文 -> 日文", "prefix": "[中翻日]"},
+    "日翻中": {"name": "日文 -> 中文", "prefix": "[日翻中]"},
+    "韓翻中": {"name": "韓文 -> 中文", "prefix": "[韓翻中]"},
+    "中翻韓": {"name": "中文 -> 韓文", "prefix": "[中翻韓]"},
+    "中翻西": {"name": "中文 -> 西班牙文", "prefix": "[中翻西]"},
+    "西翻中": {"name": "西班牙文 -> 中文", "prefix": "[西翻中]"}
 }
 
-async def ollama_request(text, system_prompt):
+def post_process_translation(text, mode):
+    # 若目標語言不是中文，但結果包含中文，嘗試過濾掉可能的解釋
+    if "翻中" not in mode:
+        # 移除包含中文的括號或後續文字 (Gemma 喜歡在後面括號解釋)
+        # 例如: "Churros (西班牙油條是一種...)" -> "Churros"
+        text = re.split(r'[\(\（\s]*[\u4e00-\u9fff]+', text)[0]
+    
+    # 移除常見的開場白
+    text = re.sub(r'^(翻譯結果|譯文|Translation)：\s*', '', text, flags=re.I)
+    return text.strip()
+
+async def ollama_request(text, mode):
     client = ollama.Client(host=os.getenv('OLLAMA_HOST'))
-    response = client.chat(model="translategemma:4b", messages = [
-        {
-            'role': 'system',
-            'content': system_prompt
-        },
-        {
-            'role': 'user',
-            'content': text
-        },
-    ])
-    return response['message']['content']
+    mode_info = TRANSLATION_PROMPTS[mode]
+    
+    messages = [
+        {'role': 'system', 'content': SYSTEM_BASE}
+    ]
+    messages.extend(FEW_SHOT_EXAMPLES)
+    messages.append({
+        'role': 'user',
+        'content': f"{mode_info['prefix']} {text}"
+    })
+    
+    response = client.chat(model="translategemma:4b", messages=messages)
+    content = response['message']['content']
+    return post_process_translation(content, mode)
 
-
+def create_translation_flex_message(original, translated, mode_name):
+    flex_contents = {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": mode_name,
+                    "weight": "bold",
+                    "color": "#1DB446",
+                    "size": "sm"
+                },
+                {
+                    "type": "separator",
+                    "margin": "md"
+                },
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "lg",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "原文",
+                                    "size": "xs",
+                                    "color": "#8C8C8C"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": original,
+                                    "wrap": True,
+                                    "color": "#666666",
+                                    "size": "md"
+                                }
+                            ]
+                        },
+                        {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "譯文",
+                                    "size": "xs",
+                                    "color": "#8C8C8C"
+                                },
+                                {
+                                    "type": "text",
+                                    "text": translated,
+                                    "wrap": True,
+                                    "color": "#111111",
+                                    "size": "lg",
+                                    "weight": "bold"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    # 使用 from_json 需要將 dict 轉為 json string
+    import json
+    return FlexMessage(
+        alt_text=f"翻譯結果: {translated}",
+        contents=FlexContainer.from_json(json.dumps(flex_contents))
+    )
 
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
@@ -140,15 +225,17 @@ def handle_message(event):
         return
 
     # Perform translation
-    system_prompt = TRANSLATION_PROMPTS[current_mode]['system']
-    msg = asyncio.run(ollama_request(text, system_prompt))
+    translated_text = asyncio.run(ollama_request(text, current_mode))
+    mode_name = TRANSLATION_PROMPTS[current_mode]['name']
+    
+    flex_msg = create_translation_flex_message(text, translated_text, mode_name)
     
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=msg)]
+                messages=[flex_msg]
             )
         )
 
